@@ -15,14 +15,6 @@
  */
 package com.ngdata.hbaseindexer.morphline;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
-
-import org.apache.hadoop.hbase.client.Result;
-import org.apache.hadoop.hbase.util.Bytes;
-
 import com.cloudera.cdk.morphline.api.Command;
 import com.cloudera.cdk.morphline.api.CommandBuilder;
 import com.cloudera.cdk.morphline.api.MorphlineContext;
@@ -39,6 +31,13 @@ import com.ngdata.hbaseindexer.parse.extract.PrefixMatchingCellExtractor;
 import com.ngdata.hbaseindexer.parse.extract.PrefixMatchingQualifierExtractor;
 import com.ngdata.hbaseindexer.parse.extract.SingleCellExtractor;
 import com.typesafe.config.Config;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.util.Bytes;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Command that extracts cells from the given HBase Result, and transforms the resulting values into a
@@ -73,7 +72,7 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
 
         @Override
         protected boolean doProcess(Record record) {
-            Result result = (Result)record.getFirstValue(Fields.ATTACHMENT_BODY);
+            Result result = (Result) record.getFirstValue(Fields.ATTACHMENT_BODY);
             Preconditions.checkNotNull(result);
             removeAttachments(record);
             for (Mapping mapping : mappings) {
@@ -100,6 +99,7 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
         private final byte[] columnFamily;
         private final byte[] qualifier;
         private final boolean isWildCard;
+        private final boolean isOutputFieldDynamic;
         private final String outputFieldName;
         private final ByteArrayExtractor extractor;
         private final String type;
@@ -117,6 +117,10 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
             }
             this.qualifier = Bytes.toBytes(qualifierString);
             this.outputFieldName = configs.getString(config, "outputField");
+
+            // -- Check if the outputField name contains an *
+            this.isOutputFieldDynamic = outputFieldName.contains("*");
+
             this.type = configs.getString(config, "type", "byte[]");
             if (type.equals("byte[]")) { // pass through byte[] to downstream morphline commands without conversion
                 this.byteArrayMapper = new ByteArrayValueMapper() {
@@ -147,7 +151,7 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
                 }
             }
             if (context instanceof HBaseMorphlineContext) {
-                ((HBaseMorphlineContext)context).getExtractors().add(this.extractor);
+                ((HBaseMorphlineContext) context).getExtractors().add(this.extractor);
             }
 
             configs.validateArguments(config);
@@ -164,7 +168,15 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
         public void apply(Result result, Record record) {
             for (byte[] bytes : extractor.extract(result)) {
                 for (Object value : byteArrayMapper.map(bytes)) {
-                    record.put(outputFieldName, value);
+                    // -- Check if the qualifier and the outputField are dynamic
+                    if (this.isOutputFieldDynamic && this.isWildCard) {
+                        // -- Build the dynamic field with the extracted value from the qualifier
+                        String dynamicValue = Bytes.toString((byte[]) new PrefixMatchingQualifierExtractor(columnFamily, qualifier).extract(result).toArray()[0]);
+                        String dynamicOutPutField = outputFieldName.replace("*", dynamicValue);
+                        record.put(dynamicOutPutField, value);
+                    } else {
+                        record.put(outputFieldName, value);
+                    }
                 }
             }
         }
@@ -181,6 +193,7 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
     // /////////////////////////////////////////////////////////////////////////////
     // Nested classes:
     // /////////////////////////////////////////////////////////////////////////////
+
     /**
      * Specifies where values to index should be extracted from in an HBase {@code KeyValue}.
      */
